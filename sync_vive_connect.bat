@@ -10,10 +10,10 @@ echo =====================================================
 echo.
 
 ::=== 這裡改成你的手機 IP（不要多打空白） ===
-set DEVICE_IP=172.26.2.37
+set DEVICE_IP=172.26.5.8
 
 ::=== 手機與電腦資料夾 ===
-set PC_DIR=C:\Users\USER\Desktop\project\backup
+set PC_DIR=C:\Users\USER\Desktop\obstacle\backup
 
 ::=== 建立備份資料夾（若不存在） ===
 if not exist "%PC_DIR%" (
