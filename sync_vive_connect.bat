@@ -13,7 +13,7 @@ echo.
 set DEVICE_IP=172.26.5.8
 
 ::=== 手機與電腦資料夾 ===
-set PC_DIR=C:\Users\USER\Desktop\obstacle\backup
+set PC_DIR=C:\Users\USER\Desktop\obstacle\images
 
 ::=== 建立備份資料夾（若不存在） ===
 if not exist "%PC_DIR%" (
@@ -80,8 +80,6 @@ if %fileCount%==0 (
     echo [Info] No new files to sync
     echo -----------------------------------------------------
     del file_list.txt
-    echo.
-    pause
     exit /b
 )
 
@@ -109,5 +107,4 @@ echo        %PC_DIR%
 echo =====================================================
 echo.
 
-pause
 endlocal
