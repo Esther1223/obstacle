@@ -1,4 +1,6 @@
+import argparse
 import subprocess
+import time
 from pathlib import Path
 
 import cv2
@@ -31,7 +33,7 @@ BOX_DEPTH_BOTTOM_RATIO = 0.7
 # ============================================================
 # 1. Load MiDaS
 # ============================================================
-print("載入 MiDaS 中...")
+print("Loading MiDaS ...")
 midas = torch.hub.load("intel-isl/MiDaS", MIDAS_MODEL_TYPE)
 midas.to(DEVICE)
 midas.eval()
@@ -63,7 +65,7 @@ def run_midas(bgr: np.ndarray) -> np.ndarray:
 # ============================================================
 # 2. Load YOLO
 # ============================================================
-print("載入 YOLO 中...")
+print("Loading YOLO ...")
 yolo = YOLO(YOLO_WEIGHTS)
 
 
@@ -112,6 +114,14 @@ def box_side(bbox, W):
         return "center"
 
 
+def iter_images(directory: Path):
+    """Return sorted image paths in the directory."""
+    return sorted(
+        p for p in directory.glob("*")
+        if p.suffix.lower() in [".jpg", ".png", ".jpeg", ".bmp"]
+    )
+
+
 # ============================================================
 # 4. Notify helpers (ADB broadcast)
 # ============================================================
@@ -121,7 +131,7 @@ def send_left():
     try:
         subprocess.run(cmd, check=True)
     except Exception as e:
-        print("send_left 失敗:", e)
+        print("send_left failed:", e)
 
 
 def send_right():
@@ -130,94 +140,116 @@ def send_right():
     try:
         subprocess.run(cmd, check=True)
     except Exception as e:
-        print("send_right 失敗:", e)
+        print("send_right failed:", e)
+
 
 def send_either():
-    """通知手機：左右皆可"""
+    """Notify client: go either side."""
     cmd = ["adb", "shell", "am", "broadcast", "-a", "com.nav.EITHER"]
     try:
         subprocess.run(cmd, check=True)
     except Exception as e:
-        print("send_either 錯誤:", e)
-# ============================================================
-# 5. Main
-# ============================================================
-def main():
-    imgs = [p for p in IMAGE_DIR.glob("*") if p.suffix.lower() in [".jpg", ".png", ".jpeg", ".bmp"]]
-    if not imgs:
-        print("images/ 沒有圖片")
+        print("send_either failed:", e)
+
+
+def send_straight():
+    """Notify client: go straight."""
+    cmd = ["adb", "shell", "am", "broadcast", "-a", "com.nav.STRAIGHT"]
+    try:
+        subprocess.run(cmd, check=True)
+    except Exception as e:
+        print("send_straight failed:", e)
+
+
+def process_image_file(img_path: Path):
+    """Run detection on a single image path."""
+    print(f"\nProcessing {img_path.name} ...")
+    bgr = cv2.imread(str(img_path))
+    if bgr is None:
+        print(f"Cannot read image: {img_path}")
         return
 
-    for img_path in imgs:
-        print(f"\n處理 {img_path.name} ...")
-        bgr = cv2.imread(str(img_path))
-        if bgr is None:
+    H, W = bgr.shape[:2]
+
+    # ======================
+    # MiDaS depth
+    # ======================
+    depth = run_midas(bgr)
+
+    # Background depth: 10% percentile
+    background_depth = np.percentile(depth, 10)
+
+    # Depth colormap
+    dn = (depth - depth.min()) / (depth.max() - depth.min() + 1e-8)
+    depth_vis = cv2.applyColorMap((dn * 255).astype(np.uint8), cv2.COLORMAP_MAGMA)
+
+    # ======================
+    # YOLO detection
+    # ======================
+    results = yolo(bgr, conf=YOLO_CONF_TH, iou=YOLO_IOU_TH, verbose=False)
+    boxes = results[0].boxes
+
+    out_img = bgr.copy()
+    danger_count = 0
+    danger_centers = []
+    side_stats = {"left": 0, "center": 0, "right": 0}
+    advice_text = "SAFE"
+    advice_code = "SAFE"
+
+    for box in boxes:
+        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().tolist()
+        cls = results[0].names[int(box.cls.item())]
+        conf = float(box.conf.item())
+
+        d_mean = box_depth_mean(depth, (x1, y1, x2, y2))
+        if d_mean is None:
             continue
 
-        H, W = bgr.shape[:2]
+        ratio = d_mean / background_depth
+        is_danger = ratio >= DANGER_RATIO
 
-        # ======================
-        # MiDaS depth
-        # ======================
-        depth = run_midas(bgr)
+        side = box_side((x1, y1, x2, y2), W)
 
-        # Background depth: 10% percentile
-        background_depth = np.percentile(depth, 10)
+        if is_danger:
+            danger_count += 1
+            cx = (x1 + x2) / 2.0
+            danger_centers.append((cx, ratio))
+            side_stats[side] += 1
 
-        # Depth colormap
-        dn = (depth - depth.min()) / (depth.max() - depth.min() + 1e-8)
-        depth_vis = cv2.applyColorMap((dn * 255).astype(np.uint8), cv2.COLORMAP_MAGMA)
+        color = (0, 0, 255) if is_danger else (0, 255, 0)
 
-        # ======================
-        # YOLO detection
-        # ======================
-        results = yolo(bgr, conf=YOLO_CONF_TH, iou=YOLO_IOU_TH, verbose=False)
-        boxes = results[0].boxes
+        cv2.rectangle(out_img, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
 
-        out_img = bgr.copy()
-        danger_count = 0
-        danger_centers = []
+        label = f"{cls} {conf:.2f} d={d_mean:.1f} r={ratio:.2f} {side}"
+        if is_danger:
+            label = "[D] " + label
+
+        draw_text(out_img, label, (int(x1), max(0, int(y1) - 10)), color)
+        draw_text(depth_vis, f"{ratio:.2f}", (int(x1), max(0, int(y1) - 10)), color)
+
+    # ---------- Advice based on weighted danger center ----------
+    if danger_count == 0:
         advice_text = "SAFE"
         advice_code = "SAFE"
+    else:
+        left_c = side_stats["left"]
+        center_c = side_stats["center"]
+        right_c = side_stats["right"]
 
-        for box in boxes:
-            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().tolist()
-            cls = results[0].names[int(box.cls.item())]
-            conf = float(box.conf.item())
+        # Left and right both blocked, center empty -> go straight
+        if left_c > 0 and right_c > 0 and center_c == 0:
+            advice_text = "ADVICE: GO STRAIGHT"
+            advice_code = "STRAIGHT"
+        else:
+            # Weighted center of danger areas
+            weighted_cx = sum(cx * w for (cx, w) in danger_centers) / (sum(w for (_, w) in danger_centers) + 1e-6)
 
-            d_mean = box_depth_mean(depth, (x1, y1, x2, y2))
-            if d_mean is None:
-                continue
-
-            ratio = d_mean / background_depth
-            is_danger = ratio >= DANGER_RATIO
-
-            if is_danger:
-                danger_count += 1
-                cx = (x1 + x2) / 2.0
-                danger_centers.append((cx, ratio))
-
-            side = box_side((x1, y1, x2, y2), W)
-            color = (0, 0, 255) if is_danger else (0, 255, 0)
-
-            cv2.rectangle(out_img, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
-
-            label = f"{cls} {conf:.2f} d={d_mean:.1f} r={ratio:.2f} {side}"
-            if is_danger:
-                label = "[D] " + label
-
-            draw_text(out_img, label, (int(x1), max(0, int(y1) - 10)), color)
-            draw_text(depth_vis, f"{ratio:.2f}", (int(x1), max(0, int(y1) - 10)), color)
-
-        # ---------- Advice based on weighted danger center ----------
-        if danger_count > 0:
-            weighted_cx = sum(cx * w for (cx, w) in danger_centers) / (sum(r for (_, r) in danger_centers) + 1e-6)
-            center_x = W / 2
+            center_x = W / 2.0
             dead_zone = W * 0.12
             offset = weighted_cx - center_x
 
             if abs(offset) <= dead_zone:
-                advice_text = "ADVICE: LEFT OR RIGHT"
+                advice_text = "ADVICE: GO LEFT OR RIGHT"
                 advice_code = "EITHER"
             elif offset > 0:
                 advice_text = "ADVICE: GO LEFT"
@@ -226,39 +258,91 @@ def main():
                 advice_text = "ADVICE: GO RIGHT"
                 advice_code = "RIGHT"
 
-        combined = np.hstack([
-            cv2.resize(out_img, (W, H)),
-            cv2.resize(depth_vis, (W, H))
-        ])
+    combined = np.hstack([
+        cv2.resize(out_img, (W, H)),
+        cv2.resize(depth_vis, (W, H))
+    ])
 
-        summary = f"background={background_depth:.1f}  ratio>={DANGER_RATIO}  danger={danger_count}"
-        draw_text(combined, summary, (10, 120), (255, 255, 255))
-        draw_text(combined, advice_text, (10, 350), (0, 255, 255))
+    summary = f"background={background_depth:.1f}  ratio>={DANGER_RATIO}  danger={danger_count}"
+    draw_text(combined, summary, (10, 120), (255, 255, 255))
+    draw_text(combined, advice_text, (10, 350), (0, 255, 255))
 
-        # ---- ADB broadcast hooks ----
-        if advice_code == "LEFT":
-            send_left()
-        elif advice_code == "RIGHT":
-            send_right()
-        elif advice_code == "EITHER":
-            send_either()
-        else:
-            # SAFE 之類的狀態，就先不播
-            pass
+    # ---- ADB broadcast hooks ----
+    if advice_code == "LEFT":
+        send_left()
+    elif advice_code == "RIGHT":
+        send_right()
+    elif advice_code == "EITHER":
+        send_either()
+    elif advice_code == "STRAIGHT":
+        send_straight()
+    else:
+        # SAFE does not broadcast
+        pass
 
-        out_path = OUTPUT_DIR / f"{img_path.stem}_dynratio.png"
-        cv2.imwrite(str(out_path), combined)
-        print("輸出:", out_path)
+    out_path = OUTPUT_DIR / f"{img_path.stem}_dynratio.png"
+    cv2.imwrite(str(out_path), combined)
+    print("Output:", out_path)
 
-        # 清掉已處理的來源檔，避免下次重複跑
-        try:
-            img_path.unlink()
-        except FileNotFoundError:
-            pass
-        except Exception as e:
-            print(f"刪除來源檔失敗 {img_path}: {e}")
+    try:
+        img_path.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"Remove input failed {img_path}: {e}")
 
-    print("\n全部完成")
+
+def process_images_once():
+    imgs = iter_images(IMAGE_DIR)
+    if not imgs:
+        print("images/ empty")
+        return
+
+    for img_path in imgs:
+        process_image_file(img_path)
+
+    print("\nAll done.")
+
+
+def watch_images(poll_interval: float = 1.0):
+    """Keep watching IMAGE_DIR and process images immediately when they appear."""
+    print(f"Watching {IMAGE_DIR} for new images... (poll={poll_interval}s)")
+    try:
+        while True:
+            imgs = iter_images(IMAGE_DIR)
+            if not imgs:
+                time.sleep(poll_interval)
+                continue
+
+            for img_path in imgs:
+                process_image_file(img_path)
+    except KeyboardInterrupt:
+        print("Watch mode stopped by user.")
+
+
+# ============================================================
+# 5. Main
+# ============================================================
+def main():
+    parser = argparse.ArgumentParser(description="Obstacle detection pipeline")
+    parser.add_argument("--image", type=str, help="Process a single image file and exit")
+    parser.add_argument("--watch", action="store_true", help="Watch images/ and process files as soon as they arrive")
+    parser.add_argument("--poll", type=float, default=1.0, help="Polling interval (seconds) for --watch mode")
+    args = parser.parse_args()
+
+    if args.image:
+        path = Path(args.image)
+        if not path.exists():
+            print(f"File not found: {path}")
+            return
+        process_image_file(path)
+        return
+
+    if args.watch:
+        watch_images(poll_interval=args.poll)
+        return
+
+    process_images_once()
 
 
 if __name__ == "__main__":

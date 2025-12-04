@@ -10,7 +10,7 @@ echo =====================================================
 echo.
 
 ::=== 這裡改成你的手機 IP（不要多打空白） ===
-set DEVICE_IP=172.26.5.8
+set DEVICE_IP=172.26.14.219
 
 ::=== 手機與電腦資料夾 ===
 set PC_DIR=C:\Users\USER\Desktop\obstacle\images
