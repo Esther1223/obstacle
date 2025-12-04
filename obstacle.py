@@ -11,7 +11,7 @@ from ultralytics import YOLO
 # ============================================================
 DEVICE = "cpu"
 MIDAS_MODEL_TYPE = "MiDaS_small"  # MiDaS_small is faster; switch if you need better quality
-YOLO_WEIGHTS = "yolov8n.pt"
+YOLO_WEIGHTS = "best.pt"
 
 YOLO_CONF_TH = 0.3
 YOLO_IOU_TH = 0.45
